@@ -1,6 +1,7 @@
 package com.example.ui.chat
 
 import android.content.Context
+import com.example.util.AppLog
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -8,6 +9,7 @@ import com.example.data.api.GeminiRepository
 import com.example.data.db.ChatMessage
 import com.example.data.db.ChatRepository
 import com.example.data.db.ChatSession
+import com.google.firebase.auth.FirebaseAuth
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -19,7 +21,7 @@ import kotlinx.coroutines.launch
 import java.util.UUID
 
 class ChatViewModel(
-    private val toolId: String,
+    val toolId: String,
     private val geminiRepository: GeminiRepository,
     private val chatRepository: ChatRepository
 ) : ViewModel() {
@@ -41,16 +43,52 @@ class ChatViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    init {
-        // We do not auto-create a session. We wait for the user to select one, or 
-        // type a message which will create one. Or `AppNavigation` can tell it to start a new one.
-    }
-
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
     
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error
+
+    // Selected voice for Gemini Live Voice Talking (Aoede, Puck, Charon, Kore, Fenrir)
+    private val _selectedVoice = MutableStateFlow("Aoede")
+    val selectedVoice: StateFlow<String> = _selectedVoice
+
+    // Message feedback tracking: messageId -> isPositive (true = thumbs up, false = thumbs down)
+    private val _feedbackMap = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    val feedbackMap: StateFlow<Map<String, Boolean>> = _feedbackMap
+
+    // Search state
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery
+
+    private val _searchResultsMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val searchResultsMessages: StateFlow<List<ChatMessage>> = _searchResultsMessages
+
+    private val _searchResultsSessions = MutableStateFlow<List<ChatSession>>(emptyList())
+    val searchResultsSessions: StateFlow<List<ChatSession>> = _searchResultsSessions
+
+    fun onSearchQueryChanged(query: String) {
+        _searchQuery.value = query
+        if (query.isBlank()) {
+            _searchResultsMessages.value = emptyList()
+            _searchResultsSessions.value = emptyList()
+            return
+        }
+        viewModelScope.launch {
+            _searchResultsMessages.value = chatRepository.searchMessages(query)
+            _searchResultsSessions.value = chatRepository.searchSessions(query)
+        }
+    }
+
+    fun clearSearch() {
+        _searchQuery.value = ""
+        _searchResultsMessages.value = emptyList()
+        _searchResultsSessions.value = emptyList()
+    }
+
+    fun setVoice(voice: String) {
+        _selectedVoice.value = voice
+    }
 
     fun startNewSession() {
         val newSessionId = UUID.randomUUID().toString()
@@ -72,13 +110,10 @@ class ChatViewModel(
             var sessionId = _currentSessionId.value
             if (sessionId == null) {
                 sessionId = UUID.randomUUID().toString()
-                val sessionTitle = text.take(20) + if (text.length > 20) "..." else ""
+                val sessionTitle = text.take(24) + if (text.length > 24) "..." else ""
                 val session = ChatSession(sessionId, toolId, sessionTitle, System.currentTimeMillis())
                 chatRepository.createSession(session)
                 _currentSessionId.value = sessionId
-            } else {
-                // Check if this is the first message for an empty session, maybe rename it
-                // We'll skip for now to keep it simple
             }
 
             _isLoading.value = true
@@ -97,9 +132,9 @@ class ChatViewModel(
                 }
             } else {
                 val systemInstruction = when (toolId) {
-                    "homework" -> "You are a helpful homework assistant. Provide step-by-step explanations."
-                    "youtube" -> "You are a YouTube strategist. Generate video ideas, titles, hooks, scripts, and thumbnail concepts."
-                    else -> "You are YUVRAJGPT, a powerful AI assistant."
+                    "homework" -> "You are a helpful homework assistant. Provide clear, accurate step-by-step explanations."
+                    "youtube" -> "You are an elite YouTube strategist. Generate compelling video concepts, viral titles, hooks, scripts, and thumbnail ideas."
+                    else -> "You are YUVRAJGPT, an advanced and friendly AI assistant powered by Yuvraj. Be helpful, direct, concise, and thoughtful."
                 }
                 val response = geminiRepository.generateChatResponse(text, systemInstruction)
                 response.onSuccess { replyText ->
@@ -114,6 +149,55 @@ class ChatViewModel(
         }
     }
 
+    fun regenerateLastResponse(lastAiMessage: ChatMessage) {
+        viewModelScope.launch {
+            val currentList = messages.value
+            val aiIndex = currentList.indexOfFirst { it.id == lastAiMessage.id }
+            val prevUserMessage = if (aiIndex > 0) currentList[aiIndex - 1] else null
+            val promptText = prevUserMessage?.text ?: return@launch
+            
+            _isLoading.value = true
+            _error.value = null
+            
+            val systemInstruction = when (toolId) {
+                "homework" -> "You are a helpful homework assistant. Provide clear, accurate step-by-step explanations."
+                "youtube" -> "You are an elite YouTube strategist. Generate compelling video concepts, viral titles, hooks, scripts, and thumbnail ideas."
+                else -> "You are YUVRAJGPT, an advanced and friendly AI assistant built with cutting-edge Google Gemini intelligence. Be helpful, direct, and thoughtful."
+            }
+            val response = geminiRepository.generateChatResponse(promptText, systemInstruction)
+            response.onSuccess { replyText ->
+                val newAiMsg = ChatMessage(id = UUID.randomUUID().toString(), sessionId = lastAiMessage.sessionId, text = replyText, isUser = false, timestamp = System.currentTimeMillis())
+                chatRepository.saveMessage(newAiMsg)
+            }.onFailure { e ->
+                _error.value = e.message
+            }
+            _isLoading.value = false
+        }
+    }
+
+    fun submitFeedback(
+        messageId: String,
+        isPositive: Boolean,
+        reason: String? = null,
+        comment: String? = null
+    ) {
+        _feedbackMap.value = _feedbackMap.value + (messageId to isPositive)
+        viewModelScope.launch {
+            try {
+                val currentUid = FirebaseAuth.getInstance().currentUser?.uid
+                chatRepository.firestoreRepository.saveFeedback(
+                    userId = currentUid,
+                    messageId = messageId,
+                    isPositive = isPositive,
+                    reason = reason,
+                    comment = comment
+                )
+            } catch (e: Exception) {
+                AppLog.w("ChatViewModel", "Feedback save notice: ${e.message}")
+            }
+        }
+    }
+
     fun sendLiveMessage(text: String, onResponse: (String, String?) -> Unit) {
         if (text.isBlank()) return
         
@@ -121,7 +205,7 @@ class ChatViewModel(
             var sessionId = _currentSessionId.value
             if (sessionId == null) {
                 sessionId = UUID.randomUUID().toString()
-                val sessionTitle = "Voice Chat"
+                val sessionTitle = "Live Voice Chat"
                 val session = ChatSession(sessionId, toolId, sessionTitle, System.currentTimeMillis())
                 chatRepository.createSession(session)
                 _currentSessionId.value = sessionId
@@ -130,7 +214,7 @@ class ChatViewModel(
             val userMsg = ChatMessage(id = UUID.randomUUID().toString(), sessionId = sessionId, text = text, isUser = true, timestamp = System.currentTimeMillis())
             chatRepository.saveMessage(userMsg)
 
-            val response = geminiRepository.generateLiveVoiceResponse(text)
+            val response = geminiRepository.generateLiveVoiceResponse(text, _selectedVoice.value)
             
             response.onSuccess { pair ->
                 val replyText = pair.first
@@ -141,7 +225,7 @@ class ChatViewModel(
                 
                 onResponse(replyText, base64Audio)
             }.onFailure {
-                onResponse("Sorry, I encountered an error.", null)
+                onResponse("Sorry, I encountered an error processing your request. Please try again.", null)
             }
         }
     }
@@ -157,7 +241,7 @@ class ChatViewModel(
 
     fun generateSpeech(text: String, onAudioReady: (String) -> Unit, onError: (String) -> Unit) {
         viewModelScope.launch {
-            val response = geminiRepository.generateSpeechFromText(text)
+            val response = geminiRepository.generateSpeechFromText(text, _selectedVoice.value)
             response.onSuccess { audioBase64 ->
                 onAudioReady(audioBase64)
             }.onFailure {

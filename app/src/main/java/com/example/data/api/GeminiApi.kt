@@ -1,6 +1,7 @@
 package com.example.data.api
 
 import com.example.BuildConfig
+import com.example.util.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -139,10 +140,49 @@ object RetrofitClient {
 }
 
 class GeminiRepository {
-    private val apiKey = BuildConfig.GEMINI_API_KEY
+    private val apiKey: String
+        get() {
+            val key = BuildConfig.GEMINI_API_KEY
+            return if (key.isBlank() || key == "MY_GEMINI_API_KEY" || key.startsWith("MY_")) {
+                ""
+            } else {
+                key
+            }
+        }
+
+    private fun parseApiError(code: Int, errorBody: String?): String {
+        val body = errorBody ?: ""
+        if (code == 400) {
+            if (body.contains("API_KEY_INVALID", ignoreCase = true) || body.contains("API key not valid", ignoreCase = true)) {
+                return "Invalid Gemini API key (HTTP 400). Please configure your GEMINI_API_KEY in the AI Studio Secrets panel."
+            }
+        }
+        if (code == 429) {
+            return "Quota exceeded (HTTP 429). The system is currently at capacity. Please wait a moment and try again."
+        }
+        if (code == 403) {
+            return "Access denied (HTTP 403). Please verify your Gemini API key permissions."
+        }
+        if (code == 404) {
+            return "Requested AI model or endpoint not found (HTTP 404)."
+        }
+        if (code in 500..599) {
+            return "Gemini service temporarily unavailable (HTTP $code). Please try again in a few moments."
+        }
+        val match = Regex("\"message\"\\s*:\\s*\"([^\"]+)\"").find(body)
+        val msg = match?.groupValues?.getOrNull(1)
+        return if (!msg.isNullOrBlank()) {
+            msg
+        } else {
+            "Request failed with HTTP $code"
+        }
+    }
     
     suspend fun generateChatResponse(prompt: String, systemInstruction: String): Result<String> = withContext(Dispatchers.IO) {
-        if (apiKey.isEmpty()) return@withContext Result.failure(Exception("API Key missing"))
+        val key = apiKey
+        if (key.isEmpty()) {
+            return@withContext Result.failure(Exception("Gemini API key is not configured. Please add your GEMINI_API_KEY in the AI Studio Secrets panel."))
+        }
         
         val request = GenerateContentRequest(
             contents = listOf(Content(parts = listOf(Part(text = prompt)))),
@@ -150,20 +190,26 @@ class GeminiRepository {
         )
         
         try {
-            val response = RetrofitClient.service.generateContent(apiKey, request)
+            val response = RetrofitClient.service.generateContent(key, request)
             val text = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
             if (text != null) Result.success(text)
-            else Result.failure(Exception(response.error?.message ?: "Unknown error"))
+            else Result.failure(Exception(response.error?.message ?: "Empty response received"))
         } catch (e: retrofit2.HttpException) {
             val errorBody = e.response()?.errorBody()?.string()
-            Result.failure(Exception("HTTP Error: ${e.code()} - $errorBody"))
+            val parsed = parseApiError(e.code(), errorBody)
+            AppLog.e("GeminiAPI", "HTTP Error ${e.code()}: $parsed")
+            Result.failure(Exception(parsed))
         } catch (e: Exception) {
+            AppLog.e("GeminiAPI", "Chat exception: ${e.message}", e)
             Result.failure(e)
         }
     }
     
     suspend fun generateImage(prompt: String): Result<String> = withContext(Dispatchers.IO) {
-        if (apiKey.isEmpty()) return@withContext Result.failure(Exception("API Key missing"))
+        val key = apiKey
+        if (key.isEmpty()) {
+            return@withContext Result.failure(Exception("Gemini API key is not configured. Please add your GEMINI_API_KEY in the AI Studio Secrets panel."))
+        }
         
         val request = GenerateContentRequest(
             contents = listOf(Content(parts = listOf(Part(text = prompt)))),
@@ -174,21 +220,26 @@ class GeminiRepository {
         )
         
         try {
-            val response = RetrofitClient.service.generateImage(apiKey, request)
-            // The image generates as base64 in the inlineData part
+            val response = RetrofitClient.service.generateImage(key, request)
             val base64 = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.inlineData?.data
             if (base64 != null) Result.success(base64)
             else Result.failure(Exception("Failed to generate image"))
         } catch (e: retrofit2.HttpException) {
             val errorBody = e.response()?.errorBody()?.string()
-            Result.failure(Exception("HTTP Error: ${e.code()} - $errorBody"))
+            val parsed = parseApiError(e.code(), errorBody)
+            AppLog.e("GeminiAPI", "Image HTTP Error ${e.code()}: $parsed")
+            Result.failure(Exception(parsed))
         } catch (e: Exception) {
+            AppLog.e("GeminiAPI", "Image exception: ${e.message}", e)
             Result.failure(e)
         }
     }
     
     suspend fun generateMusic(prompt: String): Result<String> = withContext(Dispatchers.IO) {
-        if (apiKey.isEmpty()) return@withContext Result.failure(Exception("API Key missing"))
+        val key = apiKey
+        if (key.isEmpty()) {
+            return@withContext Result.failure(Exception("Gemini API key is not configured. Please add your GEMINI_API_KEY in the AI Studio Secrets panel."))
+        }
         
         val request = GenerateContentRequest(
             contents = listOf(Content(parts = listOf(Part(text = prompt)))),
@@ -198,82 +249,68 @@ class GeminiRepository {
         )
         
         try {
-            val response = RetrofitClient.service.generateMusic(apiKey, request)
+            val response = RetrofitClient.service.generateMusic(key, request)
             val parts = response.candidates?.firstOrNull()?.content?.parts
             val audioData = parts?.firstOrNull { it.inlineData != null }?.inlineData?.data
             if (audioData != null) Result.success(audioData)
             else Result.failure(Exception("Failed to generate music: no audio data"))
         } catch (e: retrofit2.HttpException) {
             val errorBody = e.response()?.errorBody()?.string()
-            if (e.code() == 429) {
-                Result.failure(Exception("Quota Exceeded (HTTP 429). The system is currently at maximum capacity for music generation. Please wait a moment and try again."))
-            } else {
-                Result.failure(Exception("HTTP Error: ${e.code()} - $errorBody"))
-            }
+            val parsed = parseApiError(e.code(), errorBody)
+            AppLog.e("GeminiAPI", "Music HTTP Error ${e.code()}: $parsed")
+            Result.failure(Exception(parsed))
         } catch (e: Exception) {
+            AppLog.e("GeminiAPI", "Music exception: ${e.message}", e)
             Result.failure(e)
         }
     }
 
-    suspend fun generateLiveVoiceResponse(prompt: String): Result<Pair<String, String?>> = withContext(Dispatchers.IO) {
-        if (apiKey.isEmpty()) return@withContext Result.failure(Exception("API Key missing"))
-        
-        val request = GenerateContentRequest(
-            contents = listOf(Content(parts = listOf(Part(text = prompt)))),
-            generationConfig = GenerationConfig(
-                responseModalities = listOf("TEXT", "AUDIO"),
-                speechConfig = SpeechConfig(
-                    voiceConfig = VoiceConfig(
-                        prebuiltVoiceConfig = PrebuiltVoiceConfig(voiceName = "Aoede")
-                    )
-                )
-            )
-        )
-        
-        try {
-            val response = RetrofitClient.service.generateNativeAudio(apiKey, request)
-            val parts = response.candidates?.firstOrNull()?.content?.parts
-            val text = parts?.firstOrNull { it.text != null }?.text ?: ""
-            val audioData = parts?.firstOrNull { it.inlineData != null }?.inlineData?.data
+    suspend fun generateLiveVoiceResponse(prompt: String, voiceName: String = "Aoede"): Result<Pair<String, String?>> = withContext(Dispatchers.IO) {
+        val chatResult = generateChatResponse(prompt, "You are YUVRAJGPT, a natural, smart, and friendly AI assistant. Keep spoken answers concise, engaging, and direct for real-time conversation.")
+        if (chatResult.isSuccess) {
+            val text = chatResult.getOrNull() ?: ""
+            val speechResult = generateSpeechFromText(text, voiceName)
+            val audioData = speechResult.getOrNull()
             Result.success(Pair(text, audioData))
-        } catch (e: retrofit2.HttpException) {
-            val errorBody = e.response()?.errorBody()?.string()
-            Result.failure(Exception("HTTP Error: ${e.code()} - $errorBody"))
-        } catch (e: Exception) {
-            Result.failure(e)
+        } else {
+            Result.failure(chatResult.exceptionOrNull() ?: Exception("Unknown error"))
         }
     }
 
-    suspend fun generateSpeechFromText(prompt: String): Result<String> = withContext(Dispatchers.IO) {
-        if (apiKey.isEmpty()) return@withContext Result.failure(Exception("API Key missing"))
+    suspend fun generateSpeechFromText(prompt: String, voiceName: String = "Aoede"): Result<String> = withContext(Dispatchers.IO) {
+        val key = apiKey
+        if (key.isEmpty()) {
+            return@withContext Result.failure(Exception("Gemini API key is not configured. Please add your GEMINI_API_KEY in the AI Studio Secrets panel."))
+        }
         
         val request = GenerateContentRequest(
-            contents = listOf(Content(parts = listOf(Part(text = "Read the following text exactly as written: $prompt")))),
+            contents = listOf(Content(parts = listOf(Part(text = "Say the following: $prompt")))),
             generationConfig = GenerationConfig(
                 responseModalities = listOf("AUDIO"),
                 speechConfig = SpeechConfig(
                     voiceConfig = VoiceConfig(
-                        prebuiltVoiceConfig = PrebuiltVoiceConfig(voiceName = "Aoede")
+                        prebuiltVoiceConfig = PrebuiltVoiceConfig(voiceName = voiceName)
                     )
                 )
             )
         )
         
         try {
-            val response = RetrofitClient.service.generateSpeech(apiKey, request)
+            val response = RetrofitClient.service.generateSpeech(key, request)
             val parts = response.candidates?.firstOrNull()?.content?.parts
             val audioData = parts?.firstOrNull { it.inlineData != null }?.inlineData?.data
             if (audioData != null) Result.success(audioData)
             else {
-                android.util.Log.e("GeminiAPI", "Failed to generate speech. Response: $response")
+                AppLog.e("GeminiAPI", "Failed to generate speech. Response: $response")
                 Result.failure(Exception("Failed to generate speech: no audio data"))
             }
         } catch (e: retrofit2.HttpException) {
             val errorBody = e.response()?.errorBody()?.string()
-            android.util.Log.e("GeminiAPI", "HTTP Error: ${e.code()} - $errorBody")
-            Result.failure(Exception("HTTP Error: ${e.code()} - $errorBody"))
+            val parsed = parseApiError(e.code(), errorBody)
+            AppLog.e("GeminiAPI", "Speech HTTP Error ${e.code()}: $parsed")
+            Result.failure(Exception(parsed))
         } catch (e: Exception) {
-            android.util.Log.e("GeminiAPI", "Exception: ${e.message}", e)
+            AppLog.e("GeminiAPI", "Speech exception: ${e.message}", e)
             Result.failure(e)
         }
     }

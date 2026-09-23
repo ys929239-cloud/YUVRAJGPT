@@ -1,21 +1,87 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Production ProGuard / R8 Rules for YUVRAJGPT
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# -------------------------------------------------------------
+# 1. Strip debug logging completely from release APK
+# -------------------------------------------------------------
+-assumenosideeffects class android.util.Log {
+    public static boolean isLoggable(java.lang.String, int);
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+    public static int w(...);
+    public static int e(...);
+    public static int println(...);
+}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# -------------------------------------------------------------
+# 2. Moshi & Reflection / Codegen preservation
+# -------------------------------------------------------------
+-keepattributes *Annotation*, Signature, InnerClasses, EnclosingMethod
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+-dontwarn com.squareup.moshi.**
+-keep class com.squareup.moshi.** { *; }
+-keep interface com.squareup.moshi.** { *; }
+
+# Keep data models used for Gemini API requests and responses
+-keep class com.example.data.api.** { *; }
+-keepclassmembers class com.example.data.api.** {
+    <fields>;
+    <init>(...);
+}
+
+# -------------------------------------------------------------
+# 3. Room Database
+# -------------------------------------------------------------
+-keep class androidx.room.** { *; }
+-keep class * extends androidx.room.RoomDatabase
+-dontwarn androidx.room.paging.**
+
+# Keep Room entities and DAOs
+-keep class com.example.data.db.** { *; }
+-keepclassmembers class com.example.data.db.** {
+    <fields>;
+    <init>(...);
+}
+
+# -------------------------------------------------------------
+# 4. Retrofit & OkHttp
+# -------------------------------------------------------------
+-dontwarn retrofit2.**
+-keep class retrofit2.** { *; }
+-keepclasseswithmembers class * {
+    @retrofit2.http.* <methods>;
+}
+
+-dontwarn okhttp3.**
+-keep class okhttp3.** { *; }
+
+# -------------------------------------------------------------
+# 5. Firebase & Google Identity / Credentials
+# -------------------------------------------------------------
+-keep class com.google.firebase.** { *; }
+-dontwarn com.google.firebase.**
+
+-keep class androidx.credentials.** { *; }
+-dontwarn androidx.credentials.**
+
+# -------------------------------------------------------------
+# 6. BuildConfig Preservation
+# -------------------------------------------------------------
+-keep class com.example.BuildConfig { *; }
+-keepclassmembers class com.example.BuildConfig {
+    public static final java.lang.String GEMINI_API_KEY;
+}
+
+-keep class com.google.android.libraries.identity.googleid.** { *; }
+-dontwarn com.google.android.libraries.identity.googleid.**
+
+# -------------------------------------------------------------
+# 6. Kotlin Coroutines & Jetpack Compose
+# -------------------------------------------------------------
+-dontwarn kotlinx.coroutines.**
+-keepclassmembers class kotlinx.coroutines.** {
+    volatile <fields>;
+}
+
+# Preserve line numbers and source file names for stack traces
+-keepattributes SourceFile, LineNumberTable

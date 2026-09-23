@@ -1,6 +1,6 @@
 {
   "name": "YUVRAJGPT",
-  "description": "Six AI tools. One simple app.",
+  "description": "Powered by Yuvraj. Simple, fast AI assistant.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
